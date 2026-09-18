@@ -15,7 +15,7 @@ APP_PORT="8080"
 MODE="lxc"                 # lxc | vm  (vm = leistungshungrig/KVM + GPU)
 CTID="150"
 VMID="200"
-HOSTNAME="blender"
+HOSTNAME="blender-proxmox"
 CPU="2"
 RAM="2048"                 # MB
 DISK="8"                   # GB
