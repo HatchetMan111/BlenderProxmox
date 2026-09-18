@@ -21,7 +21,7 @@ RAM="2048"                 # MB
 DISK="8"                   # GB
 STORAGE="local-lvm"
 TEMPLATE_STORAGE="local"
-TEMPLATE="debian-12-standard_12.2-1_amd64.tar.zst"
+TEMPLATE="debian-12-standard"  # Präfix — exakte Version löst resolve_template() dynamisch auf
 BRIDGE="vmbr0"
 GPU_MODE="none"            # none | passthrough | vgpu
 VM_ISO="local:iso/debian-12-netinst.iso"
@@ -146,6 +146,29 @@ resolve_id(){
   echo "$free"
 }
 
+# ---------- Template-Auflösung (versionstolerant statt hartcodiertem Datum) ----------
+resolve_template(){
+  # 1) Bereits heruntergeladenes Debian-12-Template wiederverwenden (neuestes)
+  local cached avail
+  cached=$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -oE 'debian-12-standard_[0-9][^[:space:]]*\.tar\.[a-z0-9]+' | sort -V | tail -1 || true)
+  if [[ -n "$cached" ]]; then
+    log "Nutze vorhandenes Template: $cached" >&2
+    echo "$cached"; return 0
+  fi
+  # 2) Sonst neuestes verfügbares Debian-12-Template von den Proxmox-Servern
+  log "Kein Debian-12-Template lokal — aktualisiere Template-Liste ..." >&2
+  pveam update >&2 || warn "pveam update fehlgeschlagen, versuche trotzdem Download."
+  avail=$(pveam available --section system 2>/dev/null | grep -oE 'debian-12-standard_[0-9][^[:space:]]*\.tar\.[a-z0-9]+' | sort -V | tail -1 || true)
+  if [[ -z "$avail" ]]; then
+    echo "Verfügbare Debian-Templates:" >&2
+    pveam available --section system 2>&1 | grep -i debian >&2 || true
+    die "Kein debian-12-standard-Template gefunden (Storage: $TEMPLATE_STORAGE)."
+  fi
+  log "Lade Template: $avail ..." >&2
+  pveam download "$TEMPLATE_STORAGE" "$avail" >&2
+  echo "$avail"
+}
+
 # ---------- Uninstall ----------
 if [[ "$UNINSTALL" == "1" ]]; then
   if [[ "$MODE" == "vm" ]]; then
@@ -199,12 +222,9 @@ CTID="$ID"
 log "Modus: LXC (CT $ID, $CPU CPU, ${RAM}MB RAM, ${DISK}G, GPU=$GPU_MODE)"
 log "Repo: ${GITHUB_BASE}"
 
-# Template sicherstellen (idempotent)
-if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
-  log "Template $TEMPLATE fehlt — update + download ..."
-  pveam update
-  pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
-fi
+# Template sicherstellen (idempotent, versionstolerant — kein hartcodiertes Datum)
+TEMPLATE=$(resolve_template)
+log "Template: $TEMPLATE"
 
 if pct status "$ID" >/dev/null 2>&1; then
   warn "CT $ID existiert bereits (eigene, idempotent) — nutze vorhandenen Container."
