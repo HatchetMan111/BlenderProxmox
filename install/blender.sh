@@ -55,6 +55,7 @@ on_err(){
   ls -t /tmp/blender-setup-*.log 2>/dev/null | head -1 | xargs -r tail -n 30 >&2 || true
   echo "Tipp: erneut mit Debug laufen lassen:" >&2
   echo "  bash -x -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" -- --debug" >&2
+  echo "Komplette Mitschrift: ${INSTALL_LOG:-/tmp/${APP_NAME}-install-*.log (neueste)}" >&2
   echo -e "${R}=================================${N}" >&2
 }
 trap 'on_err $LINENO "$BASH_COMMAND"' ERR
@@ -104,6 +105,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ "$DEBUG" == "1" ]] && set -x
+
+# Vollständige Host-Mitschrift (geht nie verloren, auch bei Scrollback-Limit)
+INSTALL_LOG="/tmp/${APP_NAME}-install-$$.log"
+exec > >(tee "$INSTALL_LOG") 2>&1
+log "Installations-Mitschrift: $INSTALL_LOG"
 
 [[ $EUID -eq 0 ]] || die "Bitte als root auf dem Proxmox-HOST ausführen."
 command -v pct >/dev/null || die "pct nicht gefunden — kein Proxmox-HOST?"
@@ -339,3 +345,4 @@ echo "Deinstall:  bash -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" 
 echo "VM-Modus:   bash -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" -- --vm --vmid $VMID --gpu passthrough"
 echo "Logs:       pct exec $ID -- journalctl -u blender.service -n 100 --no-pager"
 echo "Setup-Log:  $SETUP_LOG (auf dem Host)"
+echo "Mitschrift: $INSTALL_LOG (auf dem Host)"
