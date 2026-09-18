@@ -296,9 +296,22 @@ pct exec "$ID" -- bash -c "set -euo pipefail
 # Firewall im LXC (falls pve-firewall aktiv): Port öffnen
 pct exec "$ID" -- bash -c "iptables -C INPUT -p tcp --dport ${APP_PORT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${APP_PORT} -j ACCEPT 2>/dev/null || true"
 
-# ---------- Verifikation ----------
-log "Verifiziere Installation ..."
-pct exec "$ID" -- systemctl is-active blender.service
+# ---------- Verifikation (Service braucht Anlaufzeit — aktiv pollen) ----------
+log "Verifiziere Installation (warte auf Service) ..."
+pct exec "$ID" -- bash -c 'set -euo pipefail
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    s=$(systemctl is-active blender.service 2>/dev/null || true)
+    if [ "$s" = "active" ]; then echo "Service: active"; break; fi
+    echo "warte auf Service ... ($i/10, Status: $s)"
+    sleep 3
+    if [ "$i" = "10" ]; then
+      echo "FEHLER: Service nicht active (Status: $s)"
+      systemctl status blender.service --no-pager -n 25 || true
+      journalctl -u blender.service -n 50 --no-pager || true
+      exit 1
+    fi
+  done
+'
 pct exec "$ID" -- bash -c "for i in 1 2 3 4 5 6; do curl -fsS -m 5 http://localhost:${APP_PORT}/healthz && exit 0; sleep 3; done; echo '--- journal ---'; journalctl -u blender.service -n 50 --no-pager; exit 1"
 
 CT_IP=$(pct exec "$ID" -- hostname -I 2>/dev/null | awk '{print $1}')
