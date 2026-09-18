@@ -45,7 +45,7 @@ bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/BlenderPr
 
 ## 2. Was der Installer tut
 
-1. Prüft root + `pct`/`qm` (Proxmox-Host), parst Args, löst die ID auf: **fremd belegte ID → nächste freie ID** (LXC+VM teilen sich den Proxmox-ID-Raum), **eigene** Container (Hostname `blender-proxmox` bzw. Marker `/opt/blender/app/main.py`) werden für Updates wiederverwendet. `set -euo pipefail` + `trap ERR` mit **kompletter Fehlerkette** (Exit-Code, Zeile, Kommando, Stack, `pveversion`, CT-Status).
+1. Prüft root + `pct`/`qm` (Proxmox-Host), parst Args, löst die ID auf: **fremd belegte ID → nächste freie ID** (LXC+VM teilen sich den Proxmox-ID-Raum), **eigene** Container (Hostname `blender` bzw. Marker `/opt/blender/app/main.py`) werden für Updates wiederverwendet. `set -euo pipefail` + `trap ERR` mit **kompletter Fehlerkette** (Exit-Code, Zeile, Kommando, Stack, `pveversion`, CT-Status).
 2. **LXC:** lädt Debian-Template via `pveam` (idempotent), `pct create … --onboot 1`, optional `/dev/dri`-Passthrough, `pct start`.
    **VM:** `qm create … --onboot 1`, gibt GPU-Hinweise aus (siehe §4).
 3. Installiert im CT: Python3, venv, `app/requirements.txt` (FastAPI/uvicorn), kopiert `app/main.py` + `systemd/blender.service` von GitHub, `systemctl enable --now`.

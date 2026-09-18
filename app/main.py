@@ -264,7 +264,7 @@ def api_vm_generate(payload: dict):
         cmds: list[str] = []
         if mode == "lxc":
             cmds.append(
-                f"pct create {vmid} {template} --hostname blender-proxmox-{vmid} "
+                f"pct create {vmid} {template} --hostname blender-{vmid} "
                 f"--cores {cpu} --memory {ram} --rootfs {storage}:{disk} "
                 f"--net0 name=eth0,bridge={bridge},ip=dhcp --onboot 1 --start 1")
             if gpu_mode == "passthrough":
@@ -274,7 +274,7 @@ def api_vm_generate(payload: dict):
                 cmds.append(f"# vGPU im LXC wird NICHT automatisch eingerichtet — siehe README (mdev auf Host).")
         else:
             cmds.append(
-                f"qm create {vmid} --name blender-proxmox-{vmid} --cores {cpu} --sockets 1 "
+                f"qm create {vmid} --name blender-{vmid} --cores {cpu} --sockets 1 "
                 f"--memory {ram} --net0 virtio,bridge={bridge} "
                 f"--scsihw virtio-scsi-pci --scsi0 {storage}:{disk} "
                 f"--ide2 {iso},media=cdrom --boot order=scsi0 --ostype l26 --onboot 1")
