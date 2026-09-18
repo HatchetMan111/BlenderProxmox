@@ -51,6 +51,8 @@ on_err(){
   echo "--- Host-Infos ---" >&2
   pveversion 2>&1 | head -5 >&2 || true
   pct status "$CTID" 2>&1 >&2 || true
+  echo "--- letztes CT-Setup-Log (falls vorhanden) ---" >&2
+  ls -t /tmp/blender-setup-*.log 2>/dev/null | head -1 | xargs -r tail -n 30 >&2 || true
   echo "Tipp: erneut mit Debug laufen lassen:" >&2
   echo "  bash -x -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" -- --debug" >&2
   echo -e "${R}=================================${N}" >&2
@@ -262,28 +264,34 @@ sleep 3
 CT_IP=$(pct exec "$ID" -- hostname -I 2>/dev/null | awk '{print $1}')
 log "CT-IP (falls leer: DHCP abwarten): ${CT_IP:-n/a}"
 
-# ---------- Dateien ins CT laden ----------
-log "Lade App-Code von GitHub ..."
+# ---------- Dateien ins CT laden (Mitschrift ins Host-Log für Debugging) ----------
+SETUP_LOG="/tmp/blender-setup-${ID}.log"
+log "Lade App-Code von GitHub ... (Mitschrift: $SETUP_LOG)"
 pct exec "$ID" -- bash -c "set -euo pipefail
+  echo '[ct] 1/5 apt-Pakete ...'
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip curl wget ca-certificates pciutils lshw
-  mkdir -p /opt/blender/app /opt/blender/uploads /opt/blender/jobs
+  echo '[ct] 2/5 Verzeichnisse ...'
+  mkdir -p /opt/blender/app /opt/blender/uploads /opt/blender/jobs /tmp/app /tmp/systemd /etc/systemd/system
   cd /tmp
+  echo '[ct] 3/5 App-Code von GitHub ...'
   for f in 'app/main.py' 'app/requirements.txt' 'systemd/blender.service'; do
-    echo \"hole \$f ...\"
-    wget -qO \"\$f.tmp\" \"${GITHUB_BASE}/\$f\" || { echo \"FEHLER beim Laden ${GITHUB_BASE}/\$f\"; echo \"Prüfe GITHUB_USER/REPO/BRANCH oben im Script.\"; exit 1; }
+    echo \"[ct] hole \$f ...\"
+    wget -O \"\$f.tmp\" \"${GITHUB_BASE}/\$f\" || { echo \"[ct] FEHLER bei ${GITHUB_BASE}/\$f (URL und Netz im CT prüfen)\"; exit 1; }
   done
+  echo '[ct] 4/5 Dateien platzieren + venv ...'
   cp /tmp/app/main.py.tmp /opt/blender/app/main.py
   cp /tmp/app/requirements.txt.tmp /opt/blender/requirements.txt
   cp /tmp/systemd/blender.service.tmp /etc/systemd/system/blender.service
   python3 -m venv /opt/blender/venv
   /opt/blender/venv/bin/pip install --upgrade pip
   /opt/blender/venv/bin/pip install -r /opt/blender/requirements.txt
+  echo '[ct] 5/5 systemd ...'
   systemctl daemon-reload
   systemctl enable blender.service
   systemctl restart blender.service
   echo APP-SETUP-OK
-"
+" 2>&1 | tee "$SETUP_LOG"
 
 # Firewall im LXC (falls pve-firewall aktiv): Port öffnen
 pct exec "$ID" -- bash -c "iptables -C INPUT -p tcp --dport ${APP_PORT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${APP_PORT} -j ACCEPT 2>/dev/null || true"
@@ -301,3 +309,4 @@ echo "Update:     bash -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" 
 echo "Deinstall:  bash -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" -- --uninstall --ctid $ID"
 echo "VM-Modus:   bash -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" -- --vm --vmid $VMID --gpu passthrough"
 echo "Logs:       pct exec $ID -- journalctl -u blender.service -n 100 --no-pager"
+echo "Setup-Log:  $SETUP_LOG (auf dem Host)"
