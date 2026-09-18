@@ -36,7 +36,7 @@ DEBUG=0
 R="\033[31m"; G="\033[32m"; Y="\033[33m"; B="\033[34m"; N="\033[0m"
 log(){ echo -e "${B}[${APP_NAME}]${N} $*"; }
 ok(){ echo -e "${G}[OK]${N} $*"; }
-warn(){ echo -e "${Y}[WARN]${N} $*"; }
+warn(){ echo -e "${Y}[WARN]${N} $*" >&2; }
 die(){ echo -e "${R}[FEHLER]${N} $*" >&2; exit 1; }
 
 # Komplette Fehlermeldungskette (niemals nur letzte Zeile)
@@ -76,6 +76,11 @@ Optionen:
   --uninstall      Container/VM entfernen
   --debug          set -x + volle Logs
   -h|--help        Hilfe
+
+  IDs: Belegte IDs werden automatisch auf die nächste freie ID
+       hochgezählt (LXC+VM teilen sich den ID-Raum!). Eigene
+       Container (Hostname bzw. Blender-Marker) werden für
+       Updates wiederverwendet.
 EOF
 }
 
@@ -102,6 +107,45 @@ done
 command -v pct >/dev/null || die "pct nicht gefunden — kein Proxmox-HOST?"
 command -v qm >/dev/null || die "qm nicht gefunden — kein Proxmox-HOST?"
 
+# ---------- ID-Automatik (LXC+VM teilen sich den Proxmox-ID-Raum) ----------
+id_taken(){
+  local id="$1"
+  pct status "$id" >/dev/null 2>&1 || qm status "$id" >/dev/null 2>&1
+}
+next_free_id(){
+  local id="$1" tries=0
+  while id_taken "$id"; do
+    id=$((id+1)); tries=$((tries+1))
+    [[ "$tries" -gt 10000 ]] && die "Keine freie ID gefunden (Start: $1)."
+    [[ "$id" -gt 999999999 ]] && die "ID-Bereich erschöpft."
+  done
+  echo "$id"
+}
+is_ours_lxc(){
+  local id="$1"
+  pct config "$id" 2>/dev/null | grep -qE "^hostname: ${HOSTNAME}$" && return 0
+  pct exec "$id" -- test -f /opt/blender/app/main.py >/dev/null 2>&1
+}
+is_ours_vm(){
+  qm config "$1" 2>/dev/null | grep -qE "^name: ${HOSTNAME}-"
+}
+resolve_id(){
+  # $1 = Modus (lxc|vm), $2 = Wunsch-ID -> gibt die zu nutzende ID aus
+  local mode="$1" want="$2" free
+  if ! id_taken "$want"; then echo "$want"; return 0; fi
+  if [[ "$mode" == "vm" ]] && is_ours_vm "$want"; then
+    warn "VM $want ist unsere $APP_NAME-VM — wiederverwenden (Update)."
+    echo "$want"; return 0
+  fi
+  if [[ "$mode" == "lxc" ]] && is_ours_lxc "$want"; then
+    warn "CT $want ist unser $APP_NAME-Container — wiederverwenden (Update)."
+    echo "$want"; return 0
+  fi
+  free=$(next_free_id "$want")
+  warn "ID $want ist belegt (fremd) — nehme nächste freie ID: $free"
+  echo "$free"
+}
+
 # ---------- Uninstall ----------
 if [[ "$UNINSTALL" == "1" ]]; then
   if [[ "$MODE" == "vm" ]]; then
@@ -119,9 +163,10 @@ fi
 
 # ================= VM-PFAD (leistungshungrig) =================
 if [[ "$MODE" == "vm" ]]; then
+  VMID=$(resolve_id vm "$VMID")
   log "Modus: KVM-VM (ID $VMID, $CPU CPU, ${RAM}MB RAM, ${DISK}G, GPU=$GPU_MODE)"
   if qm status "$VMID" >/dev/null 2>&1; then
-    warn "VM $VMID existiert bereits (idempotent) — überspringe create, prüfe Config."
+    warn "VM $VMID existiert bereits (eigene, idempotent) — überspringe create."
   else
     qm create "$VMID" --name "${HOSTNAME}-${VMID}" --cores "$CPU" --sockets 1 \
       --memory "$RAM" --net0 "virtio,bridge=${BRIDGE}" \
@@ -149,7 +194,8 @@ if [[ "$MODE" == "vm" ]]; then
 fi
 
 # ================= LXC-PFAD (Standard) =================
-ID="$CTID"
+ID=$(resolve_id lxc "$CTID")
+CTID="$ID"
 log "Modus: LXC (CT $ID, $CPU CPU, ${RAM}MB RAM, ${DISK}G, GPU=$GPU_MODE)"
 log "Repo: ${GITHUB_BASE}"
 
@@ -161,7 +207,7 @@ if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
 fi
 
 if pct status "$ID" >/dev/null 2>&1; then
-  warn "CT $ID existiert bereits (idempotent) — nutze vorhandenen Container."
+  warn "CT $ID existiert bereits (eigene, idempotent) — nutze vorhandenen Container."
 else
   pct create "$ID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
     --hostname "$HOSTNAME" --cores "$CPU" --memory "$RAM" \
