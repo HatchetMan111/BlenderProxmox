@@ -312,7 +312,23 @@ pct exec "$ID" -- bash -c 'set -euo pipefail
     fi
   done
 '
-pct exec "$ID" -- bash -c "for i in 1 2 3 4 5 6; do curl -fsS -m 5 http://localhost:${APP_PORT}/healthz && exit 0; sleep 3; done; echo '--- journal ---'; journalctl -u blender.service -n 50 --no-pager; exit 1"
+pct exec "$ID" -- bash -c "set -euo pipefail
+  ok=0
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    for url in http://127.0.0.1:${APP_PORT}/healthz http://localhost:${APP_PORT}/healthz; do
+      if curl -fsS -m 5 \"\$url\"; then ok=1; break 2; fi
+    done
+    echo \"warte auf Web UI ... (\$i/12)\"; sleep 5
+  done
+  if [ \"\$ok\" = 1 ]; then exit 0; fi
+  echo '--- DIAGNOSE: Web UI antwortet nicht ---'
+  echo '== ss -tlnp (wer hört?) =='; ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || true
+  echo '== Prozess =='; ps aux | grep '[m]ain.py' || true
+  echo '== curl -v =='; curl -v -m 5 http://127.0.0.1:${APP_PORT}/healthz || true
+  echo '== systemctl status =='; systemctl status blender.service --no-pager -n 20 || true
+  echo '== journal =='; journalctl -u blender.service -n 60 --no-pager || true
+  exit 1
+"
 
 CT_IP=$(pct exec "$ID" -- hostname -I 2>/dev/null | awk '{print $1}')
 ok "Service läuft, Web UI antwortet."
