@@ -1,0 +1,19 @@
+[Unit]
+Description=Blender Proxmox Manager (Web UI :8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/blender/app
+Environment=APP_PORT=8080
+Environment=BASE_DIR=/opt/blender
+ExecStart=/opt/blender/venv/bin/python /opt/blender/app/main.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
