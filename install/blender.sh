@@ -24,6 +24,7 @@ TEMPLATE_STORAGE="local"
 TEMPLATE="debian-12-standard"  # Präfix — exakte Version löst resolve_template() dynamisch auf
 BRIDGE="vmbr0"
 GPU_MODE="none"            # none | passthrough | vgpu
+SKIP_BLENDER=0             # 1 = Blender (apt) überspringen (nur Manager installieren)
 VM_ISO="local:iso/debian-12-netinst.iso"
 GITHUB_USER="HatchetMan111"
 GITHUB_REPO="BlenderProxmox"
@@ -76,6 +77,7 @@ Optionen:
   --storage S      Storage (Default $STORAGE)
   --bridge B       Bridge (Default $BRIDGE)
   --gpu MODE       none|passthrough|vgpu (Default $GPU_MODE)
+  --skip-blender   Blender (apt) nicht mitinstallieren (nur Manager)
   --uninstall      Container/VM entfernen
   --debug          set -x + volle Logs
   -h|--help        Hilfe
@@ -98,6 +100,7 @@ while [[ $# -gt 0 ]]; do
     --storage) STORAGE="$2"; shift 2;;
     --bridge) BRIDGE="$2"; shift 2;;
     --gpu) GPU_MODE="$2"; shift 2;;
+  --skip-blender) SKIP_BLENDER=1; shift;;
     --uninstall) UNINSTALL=1; shift;;
     --debug) DEBUG=1; shift;;
     -h|--help) usage; exit 0;;
@@ -274,18 +277,18 @@ log "CT-IP (falls leer: DHCP abwarten): ${CT_IP:-n/a}"
 SETUP_LOG="/tmp/blender-setup-${ID}.log"
 log "Lade App-Code von GitHub ... (Mitschrift: $SETUP_LOG)"
 pct exec "$ID" -- bash -c "set -euo pipefail
-  echo '[ct] 1/5 apt-Pakete ...'
+  echo '[ct] 1/6 apt-Pakete ...'
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip curl wget ca-certificates pciutils lshw
-  echo '[ct] 2/5 Verzeichnisse ...'
+  echo '[ct] 2/6 Verzeichnisse ...'
   mkdir -p /opt/blender/app /opt/blender/uploads /opt/blender/jobs /tmp/app /tmp/systemd /etc/systemd/system
   cd /tmp
-  echo '[ct] 3/5 App-Code von GitHub ...'
+  echo '[ct] 3/6 App-Code von GitHub ...'
   for f in 'app/main.py' 'app/requirements.txt' 'systemd/blender.service'; do
     echo \"[ct] hole \$f ...\"
     wget -O \"\$f.tmp\" \"${GITHUB_BASE}/\$f\" || { echo \"[ct] FEHLER bei ${GITHUB_BASE}/\$f (URL und Netz im CT prüfen)\"; exit 1; }
   done
-  echo '[ct] 4/5 Dateien platzieren + venv ...'
+  echo '[ct] 4/6 Dateien platzieren + venv ...'
   cp /tmp/app/main.py.tmp /opt/blender/app/main.py
   cp /tmp/app/requirements.txt.tmp /opt/blender/requirements.txt
   cp /tmp/systemd/blender.service.tmp /etc/systemd/system/blender.service
@@ -293,7 +296,17 @@ pct exec "$ID" -- bash -c "set -euo pipefail
   /opt/blender/venv/bin/pip install --upgrade pip
   /opt/blender/venv/bin/pip install -r /opt/blender/requirements.txt
   /opt/blender/venv/bin/python -c \"import fastapi, uvicorn, multipart; print('[ct] deps-ok')\" || { echo '[ct] FEHLER: Python-Deps unvollständig (fastapi/uvicorn/multipart)'; exit 1; }
-  echo '[ct] 5/5 systemd ...'
+  echo '[ct] 5/6 Blender (apt, Upgrade auf 4.x per Web UI möglich) ...'
+  if [[ \"${SKIP_BLENDER:-0}\" != \"1\" ]]; then
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y blender; then
+      blender --version 2>/dev/null | head -1 || true
+    else
+      echo '[ct] WARNUNG: apt-Blender fehlgeschlagen — in der Web UI (Dashboard) nachinstallieren.'
+    fi
+  else
+    echo '[ct] Blender übersprungen (--skip-blender).'
+  fi
+  echo '[ct] 6/6 systemd ...'
   systemctl daemon-reload
   systemctl enable blender.service
   systemctl restart blender.service
@@ -319,6 +332,12 @@ pct exec "$ID" -- bash -c 'set -euo pipefail
     fi
   done
 '
+BLENDER_V=$(pct exec "$ID" -- blender --version 2>/dev/null | head -1 || true)
+if [[ -n "$BLENDER_V" ]]; then
+  ok "Blender: $BLENDER_V"
+else
+  warn "Blender (noch) nicht installiert — Dashboard → Blender installieren (apt oder 4.x-Release)."
+fi
 pct exec "$ID" -- bash -c "set -euo pipefail
   ok=0
   for i in 1 2 3 4 5 6 7 8 9 10 11 12; do

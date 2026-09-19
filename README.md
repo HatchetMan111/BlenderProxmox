@@ -48,7 +48,7 @@ bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/BlenderPr
 1. Prüft root + `pct`/`qm` (Proxmox-Host), parst Args, löst die ID auf: **fremd belegte ID → nächste freie ID** (LXC+VM teilen sich den Proxmox-ID-Raum), **eigene** Container (Hostname `blender` bzw. Marker `/opt/blender/app/main.py`) werden für Updates wiederverwendet. `set -euo pipefail` + `trap ERR` mit **kompletter Fehlerkette** (Exit-Code, Zeile, Kommando, Stack, `pveversion`, CT-Status).
 2. **LXC:** wählt automatisch das neueste Debian-12-Standard-Template (lokal vorhandenes wird wiederverwendet, sonst `pveam update/download` — versionstolerant, kein hartcodiertes Datum), `pct create … --onboot 1`, optional `/dev/dri`-Passthrough, `pct start`.
    **VM:** `qm create … --onboot 1`, gibt GPU-Hinweise aus (siehe §4).
-3. Installiert im CT: Python3, venv, `app/requirements.txt` (FastAPI/uvicorn), kopiert `app/main.py` + `systemd/blender.service` von GitHub, `systemctl enable --now`.
+3. Installiert im CT: Python3, venv, `app/requirements.txt` (FastAPI/uvicorn/python-multipart), kopiert `app/main.py` + `systemd/blender.service` von GitHub, installiert **Blender per apt** (Opt-out: `--skip-blender`; Upgrade auf 4.x jederzeit per Web-UI), `systemctl enable --now`.
 4. Öffnet Port 8080, **verifiziert**: `systemctl is-active` + `curl localhost:8080/healthz` (6 Versuche, bei Fehler volles `journalctl`), druckt finale URL + CT-IP.
 
 Erwartete Ausgabe:
