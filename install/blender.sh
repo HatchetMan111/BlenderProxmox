@@ -292,6 +292,7 @@ pct exec "$ID" -- bash -c "set -euo pipefail
   python3 -m venv /opt/blender/venv
   /opt/blender/venv/bin/pip install --upgrade pip
   /opt/blender/venv/bin/pip install -r /opt/blender/requirements.txt
+  /opt/blender/venv/bin/python -c \"import fastapi, uvicorn, multipart; print('[ct] deps-ok')\" || { echo '[ct] FEHLER: Python-Deps unvollständig (fastapi/uvicorn/multipart)'; exit 1; }
   echo '[ct] 5/5 systemd ...'
   systemctl daemon-reload
   systemctl enable blender.service
