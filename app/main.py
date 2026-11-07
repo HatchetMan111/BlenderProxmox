@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -197,7 +198,11 @@ def api_blender_install(payload: dict | None = None):
     """Installiert Blender: apt-Paket oder Release von blender.org (lokal, versionierbar)."""
     try:
         cfg = load_config()
-        version = (payload or {}).get("version", cfg.get("blender_version", "system"))
+        version = str((payload or {}).get("version", cfg.get("blender_version", "system"))).strip()
+        if version != "system" and not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            return JSONResponse(status_code=400, content={
+                "ok": False, "context": "POST /api/blender/install",
+                "error": f"Ungültige Version: {version!r} (erwartet 'system' oder z. B. '4.2.0')"})
         steps: list[dict] = []
         if version == "system":
             steps.append(run(["apt-get", "update"], timeout=300))
@@ -212,8 +217,8 @@ def api_blender_install(payload: dict | None = None):
             link = BASE_DIR / "blender-portable"
             if link.is_symlink() or link.exists():
                 link.unlink()
-            # Verzeichnisname raten
-            cands = sorted(BASE_DIR.glob(f"blender-{version}*"))
+            # Verzeichnisname raten (nur Verzeichnisse — nicht das tar.xz selbst)
+            cands = sorted(p for p in BASE_DIR.glob(f"blender-{version}*") if p.is_dir())
             if cands:
                 link.symlink_to(cands[0], target_is_directory=True)
         cfg["blender_version"] = version
@@ -249,13 +254,14 @@ async def api_render(blend: UploadFile = File(...), frames: str = "1", engine: s
 def api_vm_generate(payload: dict):
     """Generiert pct/qm-Befehle für LXC oder KVM-VM. Optional execute=1 auf PVE-Host."""
     try:
-        mode = payload.get("mode", "lxc")
+        cfg = load_config()
+        mode = payload.get("mode", cfg.get("default_mode", "lxc"))
         vmid = int(payload.get("vmid", 200))
-        cpu = int(payload.get("cpu", 2))
-        ram = int(payload.get("ram_mb", 2048))
-        disk = int(payload.get("disk_gb", 8))
-        storage = payload.get("storage", "local-lvm")
-        bridge = payload.get("bridge", "vmbr0")
+        cpu = int(payload.get("cpu", cfg.get("default_cpu", 2)))
+        ram = int(payload.get("ram_mb", cfg.get("default_ram_mb", 2048)))
+        disk = int(payload.get("disk_gb", cfg.get("default_disk_gb", 8)))
+        storage = payload.get("storage", cfg.get("default_storage", "local-lvm"))
+        bridge = payload.get("bridge", cfg.get("default_bridge", "vmbr0"))
         template = payload.get("template", "local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst")
         iso = payload.get("iso", "local:iso/debian-12-netinst.iso")
         gpu_mode = payload.get("gpu_mode", "none")
@@ -322,7 +328,7 @@ label{display:inline-block;min-width:170px;margin:4px}
 a{color:#e87d0d}
 table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #333;padding:6px;text-align:left;font-size:14px}
 </style></head><body>
-<header><h2>🎬 Blender Proxmox Manager <small style="font-weight:normal">lokal · :8080</small></h2>
+<header><h2>🎬 Blender Proxmox Manager <small style="font-weight:normal">lokal</small></h2>
 <nav>
 <button data-t="dash" class="active">Dashboard</button><button data-t="render">Blender &amp; Render</button><button data-t="vm">VM / LXC Installer</button><button data-t="gpu">GPU / vGPU</button><button data-t="log">Logs</button>
 </nav></header>
@@ -368,13 +374,17 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
  ['dash','render','vm','gpu','log'].forEach(t=>$('t-'+t).hidden=(t!==b.dataset.t));});
 async function j(u,o){const r=await fetch(u,o);const t=await r.text();try{return JSON.parse(t)}catch(e){return {ok:false,raw:t.slice(0,4000)}}}
 async function load(){const s=await j('/api/status');
+ if(!s.ok||!s.system){$('status').textContent='Status-Fehler: '+(s.error||JSON.stringify(s).slice(0,500));return;}
  $('status').innerHTML=`<table><tr><th>Host</th><td>${s.system.hostname} · ${s.system.os} · CPU ${s.system.cpu_count} · RAM ${s.system.mem_total}</td></tr>
  <tr><th>Proxmox-Host-Tools</th><td>${s.system.on_proxmox_host}</td></tr>
  <tr><th>Blender</th><td><pre>${(s.blender.version||'nicht installiert').slice(0,400)}</pre></td></tr>
  <tr><th>Service</th><td>${s.service.active}</td></tr>
  <tr><th>nvidia-smi</th><td><pre>${(s.gpu.nvidia_smi.stdout||s.gpu.nvidia_smi.stderr||'').slice(0,800)}</pre></td></tr></table>`;
  $('gpuBox').innerHTML=`<pre>${JSON.stringify(s.gpu, null, 2).slice(0,4000)}</pre>`;
- const c=s.config;let h='';for(const k of Object.keys(c)){h+=`<label>${k}</label><input id="c_${k}" value="${c[k]}"><br>`}$('cfg').innerHTML=h;}
+ const c=s.config;const box=$('cfg');box.innerHTML='';
+ for(const k of Object.keys(c)){const l=document.createElement('label');l.textContent=k;
+  const i=document.createElement('input');i.id='c_'+k;i.value=c[k];
+  box.appendChild(l);box.appendChild(i);box.appendChild(document.createElement('br'));}}
 async function installBlender(){$('status').innerHTML='installiere…';const r=await j('/api/blender/install',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:$('bver').value})});alert(JSON.stringify(r).slice(0,2000));load();}
 async function saveCfg(){const o={};document.querySelectorAll('#cfg input').forEach(i=>o[i.id.slice(2)]=i.value);await j('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});load();}
 async function doRender(){const f=$('blend').files[0];if(!f){alert('erst .blend wählen');return}const fd=new FormData();fd.append('blend',f);$('renderOut').textContent='rendert… (kann dauern)';const r=await fetch(`/api/render?x=1&frames=${$('frames').value}&engine=${$('engine').value}`,{method:'POST',body:(()=>{const d=new FormData();d.append('blend',f);return d})()});$('renderOut').textContent=(await r.text()).slice(0,6000);}

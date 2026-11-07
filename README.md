@@ -45,11 +45,11 @@ bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/BlenderPr
 
 ## 2. Was der Installer tut
 
-1. Prüft root + `pct`/`qm` (Proxmox-Host), parst Args, löst die ID auf: **fremd belegte ID → nächste freie ID** (LXC+VM teilen sich den Proxmox-ID-Raum), **eigene** Container (Hostname `blender` bzw. Marker `/opt/blender/app/main.py`) werden für Updates wiederverwendet. `set -euo pipefail` + `trap ERR` mit **kompletter Fehlerkette** (Exit-Code, Zeile, Kommando, Stack, `pveversion`, CT-Status).
-2. **LXC:** wählt automatisch das neueste Debian-12-Standard-Template (lokal vorhandenes wird wiederverwendet, sonst `pveam update/download` — versionstolerant, kein hartcodiertes Datum), `pct create … --onboot 1`, optional `/dev/dri`-Passthrough, `pct start`.
-   **VM:** `qm create … --onboot 1`, gibt GPU-Hinweise aus (siehe §4).
-3. Installiert im CT: Python3, venv, `app/requirements.txt` (FastAPI/uvicorn/python-multipart), kopiert `app/main.py` + `systemd/blender.service` von GitHub, installiert **Blender per apt** (Opt-out: `--skip-blender`; Upgrade auf 4.x jederzeit per Web-UI), `systemctl enable --now`.
-4. Öffnet Port 8080, **verifiziert**: `systemctl is-active` + `curl localhost:8080/healthz` (6 Versuche, bei Fehler volles `journalctl`), druckt finale URL + CT-IP.
+1. Prüft root + `pct`/`qm` (Proxmox-Host), parst Args, löst die ID auf: **fremd belegte ID → nächste freie ID** (LXC+VM teilen sich den Proxmox-ID-Raum), **eigene** Container (Hostname `blender`, Marker `blender-managed` in der Beschreibung oder `/opt/blender/app/main.py`) werden für Updates wiederverwendet. `set -euo pipefail` + `trap ERR` mit **Fehlerkette** (Exit-Code, Zeile, Kommando, Stack, `pveversion`, CT-Status) + komplette Mitschrift in `/tmp/blender-install-*.log`.
+2. **LXC:** wählt automatisch das neueste Debian-12-Standard-Template (lokal vorhandenes wird wiederverwendet, sonst `pveam update/download` — versionstolerant, kein hartcodiertes Datum), `pct create … --onboot 1 --unprivileged 1 --features nesting=1,keyctl=1`, optional `/dev/dri`-Passthrough, wartet aktiv auf CT-Netz (DHCP, max. 30 s) statt blind `sleep`.
+   **VM:** prüft/lädt die Debian-Netinst-ISO **automatisch nach** (`qm start` würde bei fehlender ISO sonst mit "volume does not exist" scheitern), `qm create … --boot 'order=ide2;scsi0' --onboot 1` (VM bootet den Debian-Installer von ide2), gibt GPU-Hinweise aus (siehe §4).
+3. Installiert im CT (mit DNS-Check + `apt-get update`-Retries): Python3, venv, `app/requirements.txt` (FastAPI/uvicorn/python-multipart), kopiert `app/main.py` + `systemd/blender.service` von GitHub (wget mit 3 Versuchen), installiert **Blender per apt** (Opt-out: `--skip-blender`; Upgrade auf 4.x jederzeit per Web-UI), `systemctl enable` + `restart`.
+4. **Verifiziert** aktiv: `systemctl is-active` (10 × 3 s Poll) + `curl localhost:8080/healthz` (12 × 5 s, 127.0.0.1 + localhost), bei Fehler volle Diagnose (`ss`, `journalctl`), druckt finale URL + CT-IP.
 
 Erwartete Ausgabe:
 ```
@@ -74,8 +74,8 @@ Bind: `0.0.0.0:8080` (`APP_PORT`/`BASE_DIR` via Env), systemd `Restart=always`, 
 ## 4. GPU / vGPU — automatischer vs. manueller Weg
 
 **Automatisch (Script/Web-UI):**
-- LXC + `--gpu passthrough`: reicht `/dev/dri/card0` + `renderD128` durch (`pct set … --dev0/--dev1`). Geht nur wenn Host `/dev/dri` hat.
-- VM + `--gpu passthrough`: legt VM an, druckt `qm set VMID --hostpci0 …` Vorlage.
+- LXC + `--gpu passthrough`: reicht `/dev/dri/card0` + `renderD128` durch (`pct set … --dev0/--dev1`). Geht nur wenn Host `/dev/dri` hat; der systemd-Service läuft als root, daher ist der Standard-Mode (0660) ausreichend.
+- VM + `--gpu passthrough`: lädt bei Bedarf die Debian-Netinst-ISO automatisch (`cdimage.debian.org` → Storage `local`), legt VM mit Boot-Order `ide2;scsi0` an, druckt `qm set VMID --hostpci0 …` Vorlage.
 
 **Wenn es NICHT automatisch geht (vGPU) — manueller Weg im README:**
 1. Host-Treiber: NVIDIA Host-Treiber + **vGPU Manager** installieren (Proxmox Wiki beachten, Kernel kompatibel halten).
@@ -135,5 +135,7 @@ README.md                diese Datei
 
 ## 7. Debugging
 
-- Installer gibt bei Fehlern **immer die komplette Kette** aus (Exit-Code, Zeile, Kommando, Caller-Stack, `pveversion`, CT-Status) + `bash -x`-Hinweis.
+- Installer gibt bei Fehlern eine **volle Fehlerkette** aus (Exit-Code, Zeile, Kommando, Caller-Stack, `pveversion`, CT-Status) + `bash -x`-Hinweis; die komplette Mitschrift landet in `/tmp/blender-install-<PID>.log` (Neueste: `ls -t /tmp/blender-install-*.log | head -1`), das CT-Setup in `/tmp/blender-setup-<ID>.log`.
+- **Firewall:** Die pve-firewall filtert auf dem **Host**, nicht im CT — läuft sie aktiv (Datacenter/Node/CT `firewall=1`), Port 8080 dort freigeben. Der Installer setzt keine Firewall-Regeln.
+- **Kein DHCP im Netz?** Dann `--net0` in blender.sh auf statische IP umstellen (Variable/Zeile `net0 … ip=dhcp`), sonst bleibt das CT ohne Netz und das Setup bricht beim DNS-Check ab.
 - App gibt JSON mit `traceback` zurück; zusätzlich `/api/logs` und `pct exec <ID> -- journalctl -u blender.service -n 100 --no-pager`.

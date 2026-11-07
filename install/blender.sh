@@ -15,17 +15,18 @@ APP_PORT="8080"
 MODE="lxc"                 # lxc | vm  (vm = leistungshungrig/KVM + GPU)
 CTID="150"
 VMID="200"
-HOSTNAME="blender"
+APP_HOSTNAME="blender"     # bewusst NICHT "HOSTNAME" — kollidiert mit bash-Builtin
 CPU="2"
 RAM="2048"                 # MB
 DISK="8"                   # GB
 STORAGE="local-lvm"
-TEMPLATE_STORAGE="local"
-TEMPLATE="debian-12-standard"  # Präfix — exakte Version löst resolve_template() dynamisch auf
+TEMPLATE_STORAGE="local"   # exakte Template-Version löst resolve_template() dynamisch auf
 BRIDGE="vmbr0"
 GPU_MODE="none"            # none | passthrough | vgpu
 SKIP_BLENDER=0             # 1 = Blender (apt) überspringen (nur Manager installieren)
-VM_ISO="local:iso/debian-12-netinst.iso"
+VM_ISO="local:iso/debian-12-netinst.iso"  # VM-Modus: fehlende Debian-Netinst-ISO wird automatisch geladen
+DEBIAN_ISO_MIRROR="https://cdimage.debian.org/debian-cd/current/amd64/iso-cd"
+MANAGED_TAG="blender-managed"  # Marker in CT/VM-Beschreibung — Update-Wiedererkennung auch bei gestopptem CT
 GITHUB_USER="HatchetMan111"
 GITHUB_REPO="BlenderProxmox"
 GITHUB_BRANCH="main"
@@ -51,7 +52,7 @@ on_err(){
   local i=0; while caller $i >&2; do i=$((i+1)); done
   echo "--- Host-Infos ---" >&2
   pveversion 2>&1 | head -5 >&2 || true
-  pct status "$CTID" 2>&1 >&2 || true
+  pct status "$CTID" >&2 2>/dev/null || true
   echo "--- letztes CT-Setup-Log (falls vorhanden) ---" >&2
   ls -t /tmp/blender-setup-*.log 2>/dev/null | head -1 | xargs -r tail -n 30 >&2 || true
   echo "Tipp: erneut mit Debug laufen lassen:" >&2
@@ -60,6 +61,9 @@ on_err(){
   echo -e "${R}=================================${N}" >&2
 }
 trap 'on_err $LINENO "$BASH_COMMAND"' ERR
+# gibt tee (Prozess-Substitution) Zeit, die letzten Zeilen zu flushen — sonst
+# trudeln die finalen Ausgaben erst NACH dem Prompt ein
+trap 'sleep 0.2 2>/dev/null || true' EXIT
 
 usage(){
   cat <<EOF
@@ -69,7 +73,8 @@ $APP_NAME Installer (Proxmox VE Community-Scripts-Stil)
 
 Optionen:
   --ctid ID        LXC-ID (Default $CTID)
-  --vm             statt LXC eine KVM-VM anlegen (für GPU/Renderleistung)
+  --vm             statt LXC eine KVM-VM anlegen (für GPU/Renderleistung;
+                   lädt fehlende Debian-Netinst-ISO automatisch nach)
   --vmid ID        VM-ID (Default $VMID)
   --cpu N          vCPUs (Default $CPU)
   --ram MB         RAM in MB (Default $RAM)
@@ -84,30 +89,30 @@ Optionen:
 
   IDs: Belegte IDs werden automatisch auf die nächste freie ID
        hochgezählt (LXC+VM teilen sich den ID-Raum!). Eigene
-       Container (Hostname bzw. Blender-Marker) werden für
-       Updates wiederverwendet.
+       Container (Hostname bzw. Marker "$MANAGED_TAG" in der
+       Beschreibung) werden für Updates wiederverwendet.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --ctid) CTID="$2"; shift 2;;
+    --ctid) CTID="${2:?'--ctid braucht eine ID (z. B. --ctid 150)'}"; shift 2;;
     --vm) MODE="vm"; shift;;
-    --vmid) VMID="$2"; shift 2;;
-    --cpu) CPU="$2"; shift 2;;
-    --ram) RAM="$2"; shift 2;;
-    --disk) DISK="$2"; shift 2;;
-    --storage) STORAGE="$2"; shift 2;;
-    --bridge) BRIDGE="$2"; shift 2;;
-    --gpu) GPU_MODE="$2"; shift 2;;
-  --skip-blender) SKIP_BLENDER=1; shift;;
+    --vmid) VMID="${2:?'--vmid braucht eine ID (z. B. --vmid 200)'}"; shift 2;;
+    --cpu) CPU="${2:?'--cpu braucht eine Zahl (z. B. --cpu 2)'}"; shift 2;;
+    --ram) RAM="${2:?'--ram braucht MB (z. B. --ram 2048)'}"; shift 2;;
+    --disk) DISK="${2:?'--disk braucht GB (z. B. --disk 8)'}"; shift 2;;
+    --storage) STORAGE="${2:?'--storage braucht einen Storage-Namen (z. B. local-lvm)'}"; shift 2;;
+    --bridge) BRIDGE="${2:?'--bridge braucht eine Bridge (z. B. vmbr0)'}"; shift 2;;
+    --gpu) GPU_MODE="${2:?'--gpu braucht none|passthrough|vgpu'}"; shift 2;;
+    --skip-blender) SKIP_BLENDER=1; shift;;
     --uninstall) UNINSTALL=1; shift;;
     --debug) DEBUG=1; shift;;
     -h|--help) usage; exit 0;;
     *) die "Unbekannte Option: $1 (siehe --help)";;
   esac
 done
-[[ "$DEBUG" == "1" ]] && set -x
+if [[ "$DEBUG" == "1" ]]; then set -x; fi
 
 # Vollständige Host-Mitschrift (geht nie verloren, auch bei Scrollback-Limit)
 INSTALL_LOG="/tmp/${APP_NAME}-install-$$.log"
@@ -133,12 +138,14 @@ next_free_id(){
   echo "$id"
 }
 is_ours_lxc(){
-  local id="$1"
-  pct config "$id" 2>/dev/null | grep -qE "^hostname: ${HOSTNAME}$" && return 0
+  local id="$1" cfg
+  cfg=$(pct config "$id" 2>/dev/null || true)
+  grep -qE "^hostname: ${APP_HOSTNAME}$" <<<"$cfg" && return 0
+  grep -qF "$MANAGED_TAG" <<<"$cfg" && return 0
   pct exec "$id" -- test -f /opt/blender/app/main.py >/dev/null 2>&1
 }
 is_ours_vm(){
-  qm config "$1" 2>/dev/null | grep -qE "^name: ${HOSTNAME}-"
+  qm config "$1" 2>/dev/null | grep -qE "^name: ${APP_HOSTNAME}-"
 }
 resolve_id(){
   # $1 = Modus (lxc|vm), $2 = Wunsch-ID -> gibt die zu nutzende ID aus
@@ -185,11 +192,11 @@ if [[ "$UNINSTALL" == "1" ]]; then
   if [[ "$MODE" == "vm" ]]; then
     log "Stoppe/entferne VM $VMID ..."
     qm stop "$VMID" 2>/dev/null || true
-    qm destroy "$VMID" 2>/dev/null || warn "VM $VMID existierte nicht."
+    qm destroy "$VMID" --purge 2>/dev/null || warn "VM $VMID konnte nicht entfernt werden (existiert sie / gehört sie uns?)."
   else
     log "Stoppe/entferne LXC $CTID ..."
     pct stop "$CTID" 2>/dev/null || true
-    pct destroy "$CTID" 2>/dev/null || warn "CT $CTID existierte nicht."
+    pct destroy "$CTID" --purge 2>/dev/null || warn "CT $CTID konnte nicht entfernt werden (existiert er / gehört er uns?)."
   fi
   ok "Deinstalliert."
   exit 0
@@ -199,14 +206,45 @@ fi
 if [[ "$MODE" == "vm" ]]; then
   VMID=$(resolve_id vm "$VMID")
   log "Modus: KVM-VM (ID $VMID, $CPU CPU, ${RAM}MB RAM, ${DISK}G, GPU=$GPU_MODE)"
+
+  # ISO sicherstellen: qm create akzeptiert eine fehlende ISO kommentarlos,
+  # aber qm START schlägt dann mit "volume does not exist" fehl — vorher prüfen.
+  local_iso_store="${VM_ISO%%:iso/*}"
+  iso_name="${VM_ISO#*:iso/}"
+  if ! pvesm list "$local_iso_store" --content iso 2>/dev/null | grep -qF "$iso_name"; then
+    # Exakter Name fehlt: vorhandene Debian-12-Netinst-ISO wiederverwenden (Punktversion driftet)
+    existing_iso=$(pvesm list "$local_iso_store" --content iso 2>/dev/null | grep -oE 'debian-12[0-9.]*-amd64-netinst\.iso' | sort -uV | tail -1 || true)
+    if [[ -n "$existing_iso" ]]; then
+      warn "ISO '$iso_name' nicht gefunden — nutze vorhandene Debian-Netinst-ISO: $existing_iso"
+      VM_ISO="local:iso/${existing_iso}"
+    elif [[ "$local_iso_store" == "local" ]]; then
+      warn "Kein Debian-12-Netinst-ISO auf Storage 'local' — lade automatisch (${DEBIAN_ISO_MIRROR}) ..."
+      iso_page=$(wget -qO- "${DEBIAN_ISO_MIRROR}/" || true)
+      iso_dl=$(grep -oE 'debian-12[0-9.]*-amd64-netinst\.iso' <<<"$iso_page" | sort -uV | tail -1 || true)
+      if [[ -z "$iso_dl" ]]; then
+        die "Konnte Debian-Netinst-ISO nicht automatisch ermitteln. Bitte manuell laden (GUI: local → ISOs → Upload) und VM_ISO oben anpassen."
+      fi
+      mkdir -p /var/lib/vz/template/iso
+      log "Lade ${DEBIAN_ISO_MIRROR}/${iso_dl} (ca. 600 MB, dauert kurz) ..."
+      wget -O "/var/lib/vz/template/iso/${iso_dl}" "${DEBIAN_ISO_MIRROR}/${iso_dl}" \
+        || die "ISO-Download fehlgeschlagen — bitte manuell laden (GUI: local → ISOs → Upload)."
+      VM_ISO="local:iso/${iso_dl}"
+      ok "ISO geladen: $VM_ISO"
+    else
+      die "ISO '$VM_ISO' fehlt auf Storage '$local_iso_store' — bitte vorher hochladen (GUI: Storage → ISOs) oder VM_ISO in blender.sh anpassen."
+    fi
+  fi
+  log "ISO vorhanden: $VM_ISO"
+
   if qm status "$VMID" >/dev/null 2>&1; then
     warn "VM $VMID existiert bereits (eigene, idempotent) — überspringe create."
   else
-    qm create "$VMID" --name "${HOSTNAME}-${VMID}" --cores "$CPU" --sockets 1 \
+    qm create "$VMID" --name "${APP_HOSTNAME}-${VMID}" --cores "$CPU" --sockets 1 \
       --memory "$RAM" --net0 "virtio,bridge=${BRIDGE}" \
       --scsihw virtio-scsi-pci --scsi0 "${STORAGE}:${DISK}" \
-      --ide2 "${VM_ISO},media=cdrom" --boot order=scsi0 --ostype l26 --onboot 1
-    ok "VM $VMID angelegt."
+      --ide2 "${VM_ISO},media=cdrom" --boot 'order=ide2;scsi0' --ostype l26 --onboot 1 \
+      --description "$MANAGED_TAG"
+    ok "VM $VMID angelegt (bootet Debian-Installer von ide2, Zieldisk: scsi0)."
   fi
   if [[ "$GPU_MODE" == "passthrough" ]]; then
     warn "PCI-Passthrough MUSS manuell finalisiert werden (IOMMU + Geräte-ID):"
@@ -220,10 +258,10 @@ if [[ "$MODE" == "vm" ]]; then
     echo "  Beispiel: qm set $VMID --hostpci0 0000:01:00.0,mdev=nvidia-11"
   fi
   echo "Nächste Schritte:"
-  echo "  1) qm start $VMID  # falls noch nicht gestartet"
-  echo "  2) Debian via Konsole installieren, dann IN der VM den LXC-Einzeiler-Variante laufen lassen"
-  echo "     oder Web-UI-LXC (Modus lxc) als Manager nutzen: Tab 'VM / LXC Installer'."
-  echo "  3) Manager-UI (LXC) auf http://<LXC-IP>:${APP_PORT}"
+  echo "  1) qm start $VMID   # VM bootet den Debian-Installer von der ISO (ide2)"
+  echo "  2) Konsole öffnen, Debian auf scsi0 installieren (Netinst, minimal reicht)"
+  echo "  3) Danach IN der VM Blender installieren (apt install blender) bzw. GPU-Treiber;"
+  echo "     der Manager (Web UI) läuft separat im LXC (Modus lxc): Tab 'VM / LXC Installer'."
   exit 0
 fi
 
@@ -241,11 +279,12 @@ if pct status "$ID" >/dev/null 2>&1; then
   warn "CT $ID existiert bereits (eigene, idempotent) — nutze vorhandenen Container."
 else
   pct create "$ID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
-    --hostname "$HOSTNAME" --cores "$CPU" --memory "$RAM" \
+    --hostname "$APP_HOSTNAME" --cores "$CPU" --memory "$RAM" \
     --rootfs "${STORAGE}:${DISK}" \
     --net0 "name=eth0,bridge=${BRIDGE},ip=dhcp" \
     --onboot 1 --start 1 --unprivileged 1 \
-    --features nesting=1,keyctl=1
+    --features nesting=1,keyctl=1 \
+    --description "$MANAGED_TAG"
   ok "CT $ID erstellt."
 fi
 
@@ -256,8 +295,27 @@ if [[ "$GPU_MODE" == "passthrough" ]]; then
     # idempotent: vorhandene dev-Einträge erst entfernen
     pct set "$ID" --delete dev0 2>/dev/null || true
     pct set "$ID" --delete dev1 2>/dev/null || true
-    pct set "$ID" --dev0 /dev/dri/card0 2>/dev/null || warn "/dev/dri/card0 konnte nicht durchgereicht werden"
-    [[ -e /dev/dri/renderD128 ]] && pct set "$ID" --dev1 /dev/dri/renderD128 2>/dev/null || true
+    # vorhandene Devices automatisch wählen (card0 ist nicht garantiert, z. B. card1/card2)
+    card_dev=$(ls /dev/dri/card* 2>/dev/null | head -1 || true)
+    render_dev=$(ls /dev/dri/renderD* 2>/dev/null | head -1 || true)
+    if [[ -n "$card_dev" ]]; then
+      if pct set "$ID" --dev0 "$card_dev" 2>/dev/null; then
+        ok "dev0: $card_dev durchgereicht."
+      else
+        warn "$card_dev konnte nicht durchgereicht werden"
+      fi
+    else
+      warn "Kein /dev/dri/card* gefunden — dev0 übersprungen."
+    fi
+    if [[ -n "$render_dev" ]]; then
+      if pct set "$ID" --dev1 "$render_dev" 2>/dev/null; then
+        ok "dev1: $render_dev durchgereicht."
+      else
+        warn "$render_dev konnte nicht durchgereicht werden"
+      fi
+    else
+      warn "Kein /dev/dri/renderD* gefunden — dev1 übersprungen."
+    fi
     ok "GPU /dev/dri durchgereicht."
   else
     warn "Kein /dev/dri auf dem Host — GPU-Passthrough übersprungen (siehe README manueller Weg)."
@@ -267,37 +325,73 @@ elif [[ "$GPU_MODE" == "vgpu" ]]; then
   warn "Nimm --vm für echtes vGPU oder folge README (Host: vGPU-Manager + mdev + VM)."
 fi
 
-pct start "$ID" 2>/dev/null || true
-sleep 3
+if ! pct status "$ID" 2>/dev/null | grep -q "status: running"; then
+  log "Starte CT $ID ..."
+  pct start "$ID" || die "CT $ID startete nicht — Ursache oben."
+fi
 
-CT_IP=$(pct exec "$ID" -- hostname -I 2>/dev/null | awk '{print $1}')
-log "CT-IP (falls leer: DHCP abwarten): ${CT_IP:-n/a}"
+# Auf CT-Netz warten (DHCP kann dauern) — sonst stirbt apt-get update im CT
+# an "Temporary failure resolving"; NIE blind sleep N und loslegen.
+log "Warte auf CT-Netz (DHCP, max. 30s) ..."
+CT_IP=""
+for i in $(seq 1 30); do
+  CT_IP=$(pct exec "$ID" -- hostname -I 2>/dev/null | awk '{print $1}' || true)
+  if [[ -n "$CT_IP" ]]; then break; fi
+  sleep 1
+done
+if [[ -n "$CT_IP" ]]; then
+  log "CT-IP: $CT_IP"
+else
+  warn "CT hat nach 30s keine IP (DHCP?) — Setup läuft trotzdem, braucht aber Netz."
+fi
 
 # ---------- Dateien ins CT laden (Mitschrift ins Host-Log für Debugging) ----------
+# $1 im CT = SKIP_BLENDER ("0"/"1") — bewusst als Argument statt host-seitiger
+# Expansion, damit die Expansionsrichtung eindeutig ist.
 SETUP_LOG="/tmp/blender-setup-${ID}.log"
 log "Lade App-Code von GitHub ... (Mitschrift: $SETUP_LOG)"
 pct exec "$ID" -- bash -c "set -euo pipefail
+  echo '[ct] 0/6 Netz/DNS-Check ...'
+  net_ok=0
+  for i in 1 2 3 4 5; do
+    if getent hosts deb.debian.org >/dev/null 2>&1; then net_ok=1; break; fi
+    echo \"[ct] DNS/Netz noch nicht bereit (Versuch \$i/5), warte 2s ...\"
+    sleep 2
+  done
+  if [ \"\$net_ok\" != \"1\" ]; then
+    echo \"[ct] FEHLER: CT hat kein funktionierendes Netz (DHCP/DNS prüfen: pct exec $ID -- ip a)\"
+    exit 1
+  fi
   echo '[ct] 1/6 apt-Pakete ...'
-  apt-get update
+  apt_ok=0
+  for i in 1 2 3 4 5; do
+    if apt-get update; then apt_ok=1; break; fi
+    echo \"[ct] apt-get update fehlgeschlagen (Versuch \$i/5), warte 3s ...\"
+    sleep 3
+  done
+  if [ \"\$apt_ok\" != \"1\" ]; then echo '[ct] FEHLER: apt-get update dauerhaft fehlgeschlagen'; exit 1; fi
   DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip curl wget ca-certificates pciutils lshw
   echo '[ct] 2/6 Verzeichnisse ...'
-  mkdir -p /opt/blender/app /opt/blender/uploads /opt/blender/jobs /tmp/app /tmp/systemd /etc/systemd/system
+  mkdir -p /opt/blender/app /opt/blender/uploads /opt/blender/jobs /tmp/app /tmp/systemd
   cd /tmp
   echo '[ct] 3/6 App-Code von GitHub ...'
   for f in 'app/main.py' 'app/requirements.txt' 'systemd/blender.service'; do
     echo \"[ct] hole \$f ...\"
-    wget -O \"\$f.tmp\" \"${GITHUB_BASE}/\$f\" || { echo \"[ct] FEHLER bei ${GITHUB_BASE}/\$f (URL und Netz im CT prüfen)\"; exit 1; }
+    wget -q --tries=3 --timeout=20 --waitretry=3 -O \"\$f.tmp\" \"${GITHUB_BASE}/\$f\" || { echo \"[ct] FEHLER bei ${GITHUB_BASE}/\$f (URL und Netz im CT prüfen)\"; exit 1; }
   done
   echo '[ct] 4/6 Dateien platzieren + venv ...'
   cp /tmp/app/main.py.tmp /opt/blender/app/main.py
   cp /tmp/app/requirements.txt.tmp /opt/blender/requirements.txt
   cp /tmp/systemd/blender.service.tmp /etc/systemd/system/blender.service
   python3 -m venv /opt/blender/venv
-  /opt/blender/venv/bin/pip install --upgrade pip
+  /opt/blender/venv/bin/pip install --upgrade pip || echo '[ct] Hinweis: pip-Upgrade übersprungen (nicht kritisch)'
   /opt/blender/venv/bin/pip install -r /opt/blender/requirements.txt
-  /opt/blender/venv/bin/python -c \"import fastapi, uvicorn, multipart; print('[ct] deps-ok')\" || { echo '[ct] FEHLER: Python-Deps unvollständig (fastapi/uvicorn/multipart)'; exit 1; }
+  /opt/blender/venv/bin/python -c 'import fastapi, uvicorn' || { echo '[ct] FEHLER: fastapi/uvicorn unvollständig'; exit 1; }
+  # python-multipart: import-Name je nach Version 'multipart' oder 'python_multipart'
+  /opt/blender/venv/bin/python -c 'import multipart' 2>/dev/null || /opt/blender/venv/bin/python -c 'import python_multipart' || { echo '[ct] FEHLER: python-multipart fehlt (Web-Uploads würden scheitern)'; exit 1; }
+  echo '[ct] deps-ok'
   echo '[ct] 5/6 Blender (apt, Upgrade auf 4.x per Web UI möglich) ...'
-  if [[ \"${SKIP_BLENDER:-0}\" != \"1\" ]]; then
+  if [ \"\$1\" != \"1\" ]; then
     if DEBIAN_FRONTEND=noninteractive apt-get install -y blender; then
       blender --version 2>/dev/null | head -1 || true
     else
@@ -311,10 +405,9 @@ pct exec "$ID" -- bash -c "set -euo pipefail
   systemctl enable blender.service
   systemctl restart blender.service
   echo APP-SETUP-OK
-" 2>&1 | tee "$SETUP_LOG"
-
-# Firewall im LXC (falls pve-firewall aktiv): Port öffnen
-pct exec "$ID" -- bash -c "iptables -C INPUT -p tcp --dport ${APP_PORT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${APP_PORT} -j ACCEPT 2>/dev/null || true"
+" bash "$SKIP_BLENDER" 2>&1 | tee "$SETUP_LOG"
+# Hinweis: pve-firewall filtert auf dem HOST, nicht im CT — Port 8080 ggf.
+# im Datacenter/CT-Firewall-Level freigeben (siehe README §7).
 
 # ---------- Verifikation (Service braucht Anlaufzeit — aktiv pollen) ----------
 log "Verifiziere Installation (warte auf Service) ..."
@@ -346,7 +439,7 @@ pct exec "$ID" -- bash -c "set -euo pipefail
     done
     echo \"warte auf Web UI ... (\$i/12)\"; sleep 5
   done
-  if [ \"\$ok\" = 1 ]; then exit 0; fi
+  if [ \"\$ok\" = \"1\" ]; then exit 0; fi
   echo '--- DIAGNOSE: Web UI antwortet nicht ---'
   echo '== ss -tlnp (wer hört?) =='; ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || true
   echo '== Prozess =='; ps aux | grep '[m]ain.py' || true
@@ -356,13 +449,13 @@ pct exec "$ID" -- bash -c "set -euo pipefail
   exit 1
 "
 
-CT_IP=$(pct exec "$ID" -- hostname -I 2>/dev/null | awk '{print $1}')
+CT_IP=$(pct exec "$ID" -- hostname -I 2>/dev/null | awk '{print $1}' || true)
 ok "Service läuft, Web UI antwortet."
 echo ""
 echo -e "${G}Fertig! Web UI: http://${CT_IP:-<CT-IP>}:${APP_PORT}${N}"
 echo "Update:     bash -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" -- --ctid $ID"
 echo "Deinstall:  bash -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" -- --uninstall --ctid $ID"
-echo "VM-Modus:   bash -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" -- --vm --vmid $VMID --gpu passthrough"
+echo "VM-Modus:   bash -c \"\$(wget -qLO - ${GITHUB_BASE}/install/blender.sh)\" -- --vm --gpu passthrough"
 echo "Logs:       pct exec $ID -- journalctl -u blender.service -n 100 --no-pager"
 echo "Setup-Log:  $SETUP_LOG (auf dem Host)"
 echo "Mitschrift: $INSTALL_LOG (auf dem Host)"
